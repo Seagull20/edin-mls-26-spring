@@ -19,6 +19,7 @@ from . import layers
 layers.Linear.BACKEND = "cublas"
 layers.MLP.FUSED = False
 layers.EncoderMLP.FUSED = False
+layers.DecoderRMSNormQKV.FUSED = False
 
 from . import model
 from . import rope

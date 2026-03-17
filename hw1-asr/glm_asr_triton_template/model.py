@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 # Import Triton components
 from layers import (
-    RMSNorm, LayerNorm, Linear, Embedding, MLP,
+    RMSNorm, LayerNorm, Linear, Embedding, MLP, DecoderRMSNormQKV,
     gelu, silu, softmax, get_stream
 )
 from rope import RotaryEmbedding, apply_rotary_pos_emb
@@ -230,6 +230,9 @@ class DecoderLayer:
         self.k_proj = Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
         self.v_proj = Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
         self.o_proj = Linear(num_heads * self.head_dim, hidden_size, bias=False)
+        self.input_qkv_proj = DecoderRMSNormQKV(
+            self.input_layernorm, self.q_proj, self.k_proj, self.v_proj
+        )
 
         # MLP (SwiGLU)
         self.mlp = MLP(
@@ -240,6 +243,19 @@ class DecoderLayer:
         # Attention handler
         self.attention = MultiHeadAttention(
             hidden_size, num_heads, num_kv_heads, self.head_dim
+        )
+
+    def _project_qkv(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if DecoderRMSNormQKV.FUSED and hidden_states.is_cuda:
+            return self.input_qkv_proj(hidden_states)
+
+        hidden_states = self.input_layernorm(hidden_states)
+        return (
+            self.q_proj(hidden_states),
+            self.k_proj(hidden_states),
+            self.v_proj(hidden_states),
         )
 
     def __call__(
@@ -269,12 +285,7 @@ class DecoderLayer:
 
         # Self-attention with pre-norm
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Project to Q, K, V
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, k, v = self._project_qkv(hidden_states)
 
         # Reshape for attention
         q = q.reshape(batch, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -339,12 +350,7 @@ class DecoderLayer:
 
         # Self-attention with pre-norm
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Project to Q, K, V
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, k, v = self._project_qkv(hidden_states)
 
         # Reshape for attention
         q = q.reshape(batch, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
