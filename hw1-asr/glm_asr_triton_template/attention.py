@@ -47,23 +47,35 @@ def attention_scores_kernel(
     """
     Compute scaled attention scores for a single query position.
     Grid: (batch_heads, seq_q)
-
-    *** TODO: Implement this kernel ***
     """
     pid_bh = tl.program_id(0)
     pid_q = tl.program_id(1)
 
-    # ============================================================================
-    # TODO: Implement attention score computation
-    # ============================================================================
-    #
-    # Step 1: Load query vector for this position
-    # Step 2: Load all keys for this batch_head
-    # Step 3: Compute dot-product scores and scale
-    # Step 4: Store scores
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
 
-    # YOUR CODE HERE
-    pass
+    q = tl.load(
+        q_ptr + pid_bh * stride_q0 + pid_q * stride_q1 + offs_d * stride_q2,
+        mask=offs_d < head_dim,
+        other=0.0,
+    )
+    k = tl.load(
+        k_ptr
+        + pid_bh * stride_k0
+        + offs_k[:, None] * stride_k1
+        + offs_d[None, :] * stride_k2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    scores = tl.sum(k * q[None, :], axis=1) * scale
+    tl.store(
+        scores_ptr
+        + pid_bh * stride_s0
+        + pid_q * stride_s1
+        + offs_k * stride_s2,
+        scores,
+        mask=offs_k < seq_k,
+    )
 
 
 @triton.jit
@@ -73,18 +85,15 @@ def softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE: tl.constexpr
     Grid: (batch_heads * seq_q,)
     """
     row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_SIZE)
+    row_ptr = scores_ptr + row * stride_s + offs
+    mask = offs < seq_k
 
-    # ============================================================================
-    # TODO: Implement softmax
-    # ============================================================================
-    #
-    # Step 1: Load scores row with masking
-    # Step 2: Subtract max for stability
-    # Step 3: Compute exp and normalize
-    # Step 4: Store back
-
-    # YOUR CODE HERE
-    pass
+    scores = tl.load(row_ptr, mask=mask, other=-float("inf"))
+    scores = scores - tl.max(scores, axis=0)
+    numer = tl.exp(scores)
+    denom = tl.sum(numer, axis=0)
+    tl.store(row_ptr, numer / denom, mask=mask)
 
 
 @triton.jit
@@ -113,17 +122,28 @@ def attention_output_kernel(
     pid_bh = tl.program_id(0)
     pid_q = tl.program_id(1)
 
-    # ============================================================================
-    # TODO: Implement attention output computation
-    # ============================================================================
-    #
-    # Step 1: Load attention weights for this query
-    # Step 2: Load all values for this batch_head
-    # Step 3: Compute weighted sum
-    # Step 4: Store output
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
 
-    # YOUR CODE HERE
-    pass
+    attn = tl.load(
+        attn_ptr + pid_bh * stride_w0 + pid_q * stride_w1 + offs_k * stride_w2,
+        mask=offs_k < seq_k,
+        other=0.0,
+    )
+    v = tl.load(
+        v_ptr
+        + pid_bh * stride_v0
+        + offs_k[:, None] * stride_v1
+        + offs_d[None, :] * stride_v2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    output = tl.sum(v * attn[:, None], axis=0)
+    tl.store(
+        output_ptr + pid_bh * stride_o0 + pid_q * stride_o1 + offs_d * stride_o2,
+        output,
+        mask=offs_d < head_dim,
+    )
 
 
 @triton.jit

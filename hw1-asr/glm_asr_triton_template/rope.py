@@ -49,18 +49,23 @@ def compute_freqs_kernel(
     """
     pid = tl.program_id(0)
 
-    # ============================================================================
-    # TODO: Implement frequency computation
-    # ============================================================================
-    #
-    # Step 1: Load position as scalar
-    # Step 2: Load inverse frequencies
-    # Step 3: Compute freqs = position * inv_freq
-    # Step 4: Compute cos and sin
-    # Step 5: Store concatenated cos/sin
+    offsets = tl.arange(0, BLOCK)
+    mask = (pid < seq_len) & (offsets < half_dim)
 
-    # YOUR CODE HERE
-    pass
+    position = tl.load(positions_ptr + pid * stride_pos, mask=pid < seq_len, other=0.0)
+    inv_freq = tl.load(inv_freq_ptr + offsets * stride_inv, mask=offsets < half_dim, other=0.0)
+    freqs = position * inv_freq
+
+    cos_vals = tl.cos(freqs)
+    sin_vals = tl.sin(freqs)
+
+    cos_row = cos_ptr + pid * stride_cos0
+    sin_row = sin_ptr + pid * stride_sin0
+
+    tl.store(cos_row + offsets * stride_cos1, cos_vals, mask=mask)
+    tl.store(cos_row + (offsets + half_dim) * stride_cos1, cos_vals, mask=mask)
+    tl.store(sin_row + offsets * stride_sin1, sin_vals, mask=mask)
+    tl.store(sin_row + (offsets + half_dim) * stride_sin1, sin_vals, mask=mask)
 
 
 # ============================================================================
