@@ -1,0 +1,176 @@
+============================================================
+  DETAILED BENCHMARK: Flash Attention Fusion ENABLED
+============================================================
+======================================================================
+GLM-ASR Detailed Operator Profiling
+======================================================================
+
+Loading test audio...
+Audio: 3.50s @ 16000Hz
+
+Loading model from glm_asr_triton_template...
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Input features shape: torch.Size([1, 128, 3000])
+Input IDs shape: torch.Size([1, 59])
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 829.22ms (+/- 399.06ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 7.68ms (+/- 6.28ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 230.59ms (+/- 378.68ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 226.74ms (+/- 586.71ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 1.63ms (+/- 0.07ms)
+  Layer 1: 1.67ms (+/- 0.14ms)
+  Layer 2: 1.61ms (+/- 0.03ms)
+  Layer 3: 1.68ms (+/- 0.06ms)
+  Layer 4: 1.65ms (+/- 0.05ms)
+
+======================================================================
+PERFORMANCE SUMMARY
+======================================================================
+
+Component                              Time (ms)   % of Total
+------------------------------------------------------------
+Audio Encoder                           829.22ms        6.7%
+Multi-modal Projector                     7.68ms        0.1%
+Decoder (Prefill)                       230.59ms        1.9%
+Decoder (50 decode steps)             11337.00ms       91.4%
+------------------------------------------------------------
+TOTAL (estimated for 50 tokens)       12404.49ms
+
+============================================================
+  DETAILED BENCHMARK: Flash Attention Fusion DISABLED
+============================================================
+======================================================================
+GLM-ASR Detailed Operator Profiling
+======================================================================
+
+Loading test audio...
+Audio: 3.50s @ 16000Hz
+
+Loading model from glm_asr_triton_template...
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Input features shape: torch.Size([1, 128, 3000])
+Input IDs shape: torch.Size([1, 59])
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 802.65ms (+/- 346.74ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 7.58ms (+/- 6.11ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 224.03ms (+/- 365.61ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 38.04ms (+/- 20.47ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 1.57ms (+/- 0.08ms)
+  Layer 1: 1.64ms (+/- 0.13ms)
+  Layer 2: 1.55ms (+/- 0.02ms)
+  Layer 3: 1.55ms (+/- 0.02ms)
+  Layer 4: 1.55ms (+/- 0.03ms)
+
+======================================================================
+PERFORMANCE SUMMARY
+======================================================================
+
+Component                              Time (ms)   % of Total
+------------------------------------------------------------
+Audio Encoder                           802.65ms       27.3%
+Multi-modal Projector                     7.58ms        0.3%
+Decoder (Prefill)                       224.03ms        7.6%
+Decoder (50 decode steps)              1901.93ms       64.8%
+------------------------------------------------------------
+TOTAL (estimated for 50 tokens)        2936.19ms
+
+============================================================
+  DETAILED BENCHMARK: Triton Example (reference baseline)
+============================================================
+======================================================================
+GLM-ASR Detailed Operator Profiling
+======================================================================
+
+Loading test audio...
+Audio: 3.50s @ 16000Hz
+
+Loading model from glm_asr_triton_example...
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Input features shape: torch.Size([1, 128, 3000])
+Input IDs shape: torch.Size([1, 59])
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 835.69ms (+/- 412.90ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 7.56ms (+/- 6.04ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 388.02ms (+/- 697.61ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 198.75ms (+/- 509.03ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 1.65ms (+/- 0.08ms)
+  Layer 1: 1.65ms (+/- 0.03ms)
+  Layer 2: 1.62ms (+/- 0.03ms)
+  Layer 3: 1.61ms (+/- 0.02ms)
+  Layer 4: 1.61ms (+/- 0.03ms)
+
+======================================================================
+PERFORMANCE SUMMARY
+======================================================================
+
+Component                              Time (ms)   % of Total
+------------------------------------------------------------
+Audio Encoder                           835.69ms        7.5%
+Multi-modal Projector                     7.56ms        0.1%
+Decoder (Prefill)                       388.02ms        3.5%
+Decoder (50 decode steps)              9937.38ms       89.0%
+------------------------------------------------------------
+TOTAL (estimated for 50 tokens)       11168.66ms

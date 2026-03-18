@@ -12,6 +12,9 @@ import triton
 import triton.language as tl
 from typing import Optional, Tuple
 
+# Global switch: when True, use the fused Flash Attention kernel
+USE_FLASH_ATTENTION_FUSION = False
+
 
 def get_stream():
     """Get current CUDA stream pointer."""
@@ -186,6 +189,120 @@ def causal_mask_kernel(
 
 
 # ============================================================================
+# Flash Attention-Style Fused Kernel
+# ============================================================================
+
+@triton.jit
+def flash_attention_fused_kernel(
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    output_ptr,
+    mask_ptr,
+    scale,
+    seq_k,
+    head_dim,
+    HAS_MASK: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    stride_q0,
+    stride_q1,
+    stride_q2,
+    stride_k0,
+    stride_k1,
+    stride_k2,
+    stride_v0,
+    stride_v1,
+    stride_v2,
+    stride_o0,
+    stride_o1,
+    stride_o2,
+    stride_m0,
+    stride_m1,
+    stride_m2,
+    BLOCK_K: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """
+    Flash Attention-style fused kernel.
+    Fuses: Q@K^T*scale -> causal_mask -> attention_mask -> softmax -> @V
+    into a single kernel, avoiding materializing the scores matrix.
+
+    Grid: (batch_heads, seq_q)
+
+    Each program computes one row of the output for one (batch, head, q_pos).
+    Since seq_k <= 256, the entire K/V sequence fits in registers.
+    """
+    pid_bh = tl.program_id(0)
+    pid_q = tl.program_id(1)
+
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
+
+    # --- Step 1: Load query vector (1, head_dim) ---
+    q = tl.load(
+        q_ptr + pid_bh * stride_q0 + pid_q * stride_q1 + offs_d * stride_q2,
+        mask=offs_d < head_dim,
+        other=0.0,
+    )
+
+    # --- Step 2: Load K matrix (seq_k, head_dim) and compute scores ---
+    k = tl.load(
+        k_ptr
+        + pid_bh * stride_k0
+        + offs_k[:, None] * stride_k1
+        + offs_d[None, :] * stride_k2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    # scores[k] = sum_d(q[d] * k[k, d]) * scale
+    scores = tl.sum(k * q[None, :], axis=1) * scale
+
+    # --- Step 3: Apply causal mask ---
+    if IS_CAUSAL:
+        scores = tl.where(offs_k > pid_q, float("-inf"), scores)
+
+    # --- Step 4: Apply attention mask ---
+    if HAS_MASK:
+        m = tl.load(
+            mask_ptr
+            + pid_bh * stride_m0
+            + pid_q * stride_m1
+            + offs_k * stride_m2,
+            mask=offs_k < seq_k,
+            other=0.0,
+        )
+        scores = scores + m
+
+    # Mask out padded positions
+    scores = tl.where(offs_k < seq_k, scores, float("-inf"))
+
+    # --- Step 5: Numerically stable softmax ---
+    max_score = tl.max(scores, axis=0)
+    exp_scores = tl.exp(scores - max_score)
+    denom = tl.sum(exp_scores, axis=0)
+    attn_weights = exp_scores / denom  # (BLOCK_K,)
+
+    # --- Step 6: Load V and compute output = attn_weights @ V ---
+    v = tl.load(
+        v_ptr
+        + pid_bh * stride_v0
+        + offs_k[:, None] * stride_v1
+        + offs_d[None, :] * stride_v2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    # output[d] = sum_k(attn_weights[k] * v[k, d])
+    output = tl.sum(v * attn_weights[:, None], axis=0)
+
+    # --- Step 7: Store output ---
+    tl.store(
+        output_ptr + pid_bh * stride_o0 + pid_q * stride_o1 + offs_d * stride_o2,
+        output,
+        mask=offs_d < head_dim,
+    )
+
+
+# ============================================================================
 # Attention Classes
 # ============================================================================
 
@@ -256,7 +373,7 @@ def next_power_of_two(x: int) -> int:
 MAX_ATTENTION_DIM = 256
 
 
-def scaled_dot_product_attention(
+def _scaled_dot_product_attention_fused(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -265,7 +382,144 @@ def scaled_dot_product_attention(
     scale: Optional[float] = None,
 ) -> torch.Tensor:
     """
-    Scaled dot-product attention using Triton kernels.
+    Flash Attention-style fused scaled dot-product attention.
+    Score computation, masking, softmax, and output are all done in one kernel.
+    Eliminates the intermediate scores matrix from global memory entirely.
+    """
+    batch, num_heads, seq_q, head_dim = q.shape
+    _, _, seq_k, _ = k.shape
+
+    if scale is None:
+        scale = 1.0 / np.sqrt(head_dim)
+
+    seq_k_padded = next_power_of_two(seq_k)
+    head_dim_padded = next_power_of_two(head_dim)
+
+    use_triton = (
+        q.is_cuda
+        and seq_k_padded <= MAX_ATTENTION_DIM
+        and head_dim_padded <= MAX_ATTENTION_DIM
+    )
+
+    if use_triton:
+        q_flat = q.reshape(batch * num_heads, seq_q, head_dim).to(torch.float32)
+        k_flat = k.reshape(batch * num_heads, seq_k, head_dim).to(torch.float32)
+        v_flat = v.reshape(batch * num_heads, seq_k, head_dim).to(torch.float32)
+
+        # Pad K, V, Q to power-of-2 dimensions if needed
+        if seq_k_padded != seq_k or head_dim_padded != head_dim:
+            k_padded = torch.zeros(
+                (batch * num_heads, seq_k_padded, head_dim_padded),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            v_padded = torch.zeros_like(k_padded)
+            q_padded = torch.zeros(
+                (batch * num_heads, seq_q, head_dim_padded),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            k_padded[:, :seq_k, :head_dim] = k_flat
+            v_padded[:, :seq_k, :head_dim] = v_flat
+            q_padded[:, :, :head_dim] = q_flat
+            k_flat = k_padded
+            v_flat = v_padded
+            q_flat = q_padded
+
+        # Prepare attention mask for the fused kernel
+        has_mask = attention_mask is not None
+        if has_mask:
+            if attention_mask.ndim == 4:
+                attention_mask = attention_mask.reshape(
+                    batch * num_heads, seq_q, seq_k
+                )
+            if seq_k_padded != seq_k:
+                mask_padded = torch.zeros(
+                    (batch * num_heads, seq_q, seq_k_padded),
+                    dtype=torch.float32,
+                    device=q.device,
+                )
+                mask_padded[:, :, :seq_k] = attention_mask
+                mask_padded[:, :, seq_k:] = float("-inf")
+                attention_mask = mask_padded
+            mask_flat = attention_mask.contiguous()
+        else:
+            # Dummy pointer — won't be dereferenced when HAS_MASK=False
+            mask_flat = q_flat
+
+        output = torch.empty(
+            (batch * num_heads, seq_q, head_dim_padded),
+            dtype=torch.float32,
+            device=q.device,
+        )
+
+        grid = (batch * num_heads, seq_q)
+        flash_attention_fused_kernel[grid](
+            q_flat,
+            k_flat,
+            v_flat,
+            output,
+            mask_flat,
+            float(scale),
+            seq_k,
+            head_dim,
+            has_mask,
+            is_causal,
+            q_flat.stride(0),
+            q_flat.stride(1),
+            q_flat.stride(2),
+            k_flat.stride(0),
+            k_flat.stride(1),
+            k_flat.stride(2),
+            v_flat.stride(0),
+            v_flat.stride(1),
+            v_flat.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            mask_flat.stride(0),
+            mask_flat.stride(1),
+            mask_flat.stride(2),
+            BLOCK_K=seq_k_padded,
+            BLOCK_D=head_dim_padded,
+        )
+
+        if head_dim_padded != head_dim:
+            output = output[:, :, :head_dim]
+
+        return output.reshape(batch, num_heads, seq_q, head_dim).to(q.dtype)
+
+    # CPU / large-dim fallback (same as unfused path)
+    scores = torch.einsum("bnqd,bnkd->bnqk", q, k) * scale
+
+    if is_causal:
+        mask = torch.triu(
+            torch.ones((seq_q, seq_k), dtype=torch.float32, device=q.device),
+            diagonal=1,
+        ) * -1e9
+        scores = scores + mask[None, None, :, :]
+
+    if attention_mask is not None:
+        scores = scores + attention_mask
+
+    scores = scores - torch.max(scores, dim=-1, keepdim=True).values
+    attn_weights = torch.exp(scores)
+    attn_weights = attn_weights / torch.sum(attn_weights, dim=-1, keepdim=True)
+    output = torch.einsum("bnqk,bnkd->bnqd", attn_weights, v)
+
+    return output.to(q.dtype)
+
+
+def _scaled_dot_product_attention_unfused(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    is_causal: bool = False,
+    scale: Optional[float] = None,
+) -> torch.Tensor:
+    """
+    Original unfused scaled dot-product attention (3 separate kernels).
     """
     batch, num_heads, seq_q, head_dim = q.shape
     _, _, seq_k, _ = k.shape
@@ -413,6 +667,26 @@ def scaled_dot_product_attention(
     output = torch.einsum("bnqk,bnkd->bnqd", attn_weights, v)
 
     return output.to(q.dtype)
+
+
+def scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    is_causal: bool = False,
+    scale: Optional[float] = None,
+) -> torch.Tensor:
+    """
+    Dispatch to fused or unfused attention based on global switch.
+    """
+    if USE_FLASH_ATTENTION_FUSION:
+        return _scaled_dot_product_attention_fused(
+            q, k, v, attention_mask, is_causal, scale
+        )
+    return _scaled_dot_product_attention_unfused(
+        q, k, v, attention_mask, is_causal, scale
+    )
 
 
 if __name__ == "__main__":

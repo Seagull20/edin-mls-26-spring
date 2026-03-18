@@ -1,0 +1,81 @@
+==========================================================================================
+  Flash Attention Fusion Micro-Benchmark
+==========================================================================================
+
+--- Audio Encoder (prefill) ---
+    Shape: batch=1, heads=20, seq_q=187, seq_k=187, dim=64, causal=False
+    Max diff (fused vs unfused): 1.79e-07
+    Fused:   0.4395ms ± 0.0134ms  [95% CI: 0.4377 - 0.4414]
+    Unfused: 0.4195ms ± 0.0033ms  [95% CI: 0.4191 - 0.4200]
+    Speedup: 0.955x  (-4.8%)
+
+--- Audio Encoder (single head) ---
+    Shape: batch=1, heads=1, seq_q=187, seq_k=187, dim=64, causal=False
+    Max diff (fused vs unfused): 8.94e-08
+    Fused:   0.0855ms ± 0.0018ms  [95% CI: 0.0852 - 0.0857]
+    Unfused: 0.1190ms ± 0.0023ms  [95% CI: 0.1187 - 0.1194]
+    Speedup: 1.393x  (+28.2%)
+
+--- Text Decoder (prefill) ---
+    Shape: batch=1, heads=16, seq_q=59, seq_k=59, dim=128, causal=True
+    Max diff (fused vs unfused): 2.98e-07
+    Fused:   0.2357ms ± 0.0608ms  [95% CI: 0.2273 - 0.2441]
+    Unfused: 0.1912ms ± 0.0250ms  [95% CI: 0.1877 - 0.1947]
+    Speedup: 0.811x  (-23.3%)
+
+--- Text Decoder (1-token decode, cache=20) ---
+    Shape: batch=1, heads=16, seq_q=1, seq_k=20, dim=128, causal=False
+    Max diff (fused vs unfused): 1.19e-07
+    Fused:   0.2542ms ± 0.0703ms  [95% CI: 0.2445 - 0.2640]
+    Unfused: 0.1642ms ± 0.0229ms  [95% CI: 0.1610 - 0.1674]
+    Speedup: 0.646x  (-54.8%)
+
+--- Text Decoder (1-token decode, cache=50) ---
+    Shape: batch=1, heads=16, seq_q=1, seq_k=50, dim=128, causal=False
+    Max diff (fused vs unfused): 1.19e-07
+    Fused:   0.2147ms ± 0.0286ms  [95% CI: 0.2107 - 0.2186]
+    Unfused: 0.1607ms ± 0.0199ms  [95% CI: 0.1579 - 0.1634]
+    Speedup: 0.749x  (-33.6%)
+
+--- Text Decoder (1-token decode, cache=100) ---
+    Shape: batch=1, heads=16, seq_q=1, seq_k=100, dim=128, causal=False
+    Max diff (fused vs unfused): 1.49e-07
+    Fused:   0.2435ms ± 0.0709ms  [95% CI: 0.2337 - 0.2534]
+    Unfused: 0.1601ms ± 0.0205ms  [95% CI: 0.1573 - 0.1630]
+    Speedup: 0.657x  (-52.1%)
+
+--- Text Decoder (1-token decode, cache=200) ---
+    Shape: batch=1, heads=16, seq_q=1, seq_k=200, dim=128, causal=False
+    Max diff (fused vs unfused): 1.19e-07
+    Fused:   0.2380ms ± 0.0494ms  [95% CI: 0.2312 - 0.2449]
+    Unfused: 0.1628ms ± 0.0219ms  [95% CI: 0.1598 - 0.1658]
+    Speedup: 0.684x  (-46.2%)
+
+--- Small test (seq=16, dim=64) ---
+    Shape: batch=2, heads=4, seq_q=16, seq_k=16, dim=64, causal=False
+    Max diff (fused vs unfused): 2.38e-07
+    Fused:   0.1709ms ± 0.0211ms  [95% CI: 0.1680 - 0.1739]
+    Unfused: 0.1502ms ± 0.1315ms  [95% CI: 0.1320 - 0.1684]
+    Speedup: 0.879x  (-13.8%)
+
+--- Causal small test (seq=16, dim=64) ---
+    Shape: batch=2, heads=4, seq_q=16, seq_k=16, dim=64, causal=True
+    Max diff (fused vs unfused): 2.38e-07
+    Fused:   0.1674ms ± 0.0175ms  [95% CI: 0.1650 - 0.1698]
+    Unfused: 0.1807ms ± 0.0344ms  [95% CI: 0.1760 - 0.1855]
+    Speedup: 1.080x  (+7.4%)
+
+==========================================================================================
+  SUMMARY TABLE
+==========================================================================================
+Config                                                  Fused    Unfused    Speedup     Improv
+------------------------------------------------------------------------------------------
+Audio Encoder (prefill)                               0.4395ms    0.4195ms     0.955x      -4.8%
+Audio Encoder (single head)                           0.0855ms    0.1190ms     1.393x     +28.2%
+Text Decoder (prefill)                                0.2357ms    0.1912ms     0.811x     -23.3%
+Text Decoder (1-token decode, cache=20)               0.2542ms    0.1642ms     0.646x     -54.8%
+Text Decoder (1-token decode, cache=50)               0.2147ms    0.1607ms     0.749x     -33.6%
+Text Decoder (1-token decode, cache=100)              0.2435ms    0.1601ms     0.657x     -52.1%
+Text Decoder (1-token decode, cache=200)              0.2380ms    0.1628ms     0.684x     -46.2%
+Small test (seq=16, dim=64)                           0.1709ms    0.1502ms     0.879x     -13.8%
+Causal small test (seq=16, dim=64)                    0.1674ms    0.1807ms     1.080x      +7.4%
