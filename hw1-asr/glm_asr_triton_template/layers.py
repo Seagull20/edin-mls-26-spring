@@ -494,133 +494,6 @@ def causal_mask_kernel(
     )
 
 
-@triton.jit
-def rmsnorm_q_fused(
-    x_ptr,
-    rms_w_ptr,
-    q_weight_ptr,
-    q_out_ptr,
-    M,
-    N,
-    K,
-    stride_xm,
-    stride_xk,
-    stride_qwk,
-    stride_qwn,
-    stride_qom,
-    stride_qon,
-    eps,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    """Fuse decoder RMSNorm with the wider Q projection."""
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    mask_m = offs_m < M
-    mask_n = offs_n < N
-
-    rms = tl.zeros((BLOCK_M,), dtype=tl.float32)
-    for k in range(0, K, BLOCK_K):
-        offs_k = k + tl.arange(0, BLOCK_K)
-        mask_k = offs_k < K
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
-        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
-        rms += tl.sum(x * x, axis=1)
-
-    inv_rms = tl.rsqrt(rms / K + eps)
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
-    for k in range(0, K, BLOCK_K):
-        offs_k = k + tl.arange(0, BLOCK_K)
-        mask_k = offs_k < K
-
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
-        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
-        rms_w = tl.load(rms_w_ptr + offs_k, mask=mask_k, other=0.0).to(tl.float32)
-        x_norm = x * inv_rms[:, None] * rms_w[None, :]
-
-        q_w_ptrs = q_weight_ptr + offs_k[:, None] * stride_qwk + offs_n[None, :] * stride_qwn
-        q_w = tl.load(q_w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
-        acc += tl.dot(x_norm, q_w)
-
-    q_out_ptrs = q_out_ptr + offs_m[:, None] * stride_qom + offs_n[None, :] * stride_qon
-    tl.store(q_out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
-
-
-@triton.jit
-def rmsnorm_kv_fused(
-    x_ptr,
-    rms_w_ptr,
-    k_weight_ptr,
-    v_weight_ptr,
-    k_out_ptr,
-    v_out_ptr,
-    M,
-    N,
-    K,
-    stride_xm,
-    stride_xk,
-    stride_kwk,
-    stride_kwn,
-    stride_vwk,
-    stride_vwn,
-    stride_kom,
-    stride_kon,
-    stride_vom,
-    stride_von,
-    eps,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    """Fuse decoder RMSNorm with the narrower K/V projections."""
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    mask_m = offs_m < M
-    mask_n = offs_n < N
-
-    rms = tl.zeros((BLOCK_M,), dtype=tl.float32)
-    for k in range(0, K, BLOCK_K):
-        offs_k = k + tl.arange(0, BLOCK_K)
-        mask_k = offs_k < K
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
-        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
-        rms += tl.sum(x * x, axis=1)
-
-    inv_rms = tl.rsqrt(rms / K + eps)
-    k_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    v_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
-    for k in range(0, K, BLOCK_K):
-        offs_k = k + tl.arange(0, BLOCK_K)
-        mask_k = offs_k < K
-
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
-        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
-        rms_w = tl.load(rms_w_ptr + offs_k, mask=mask_k, other=0.0).to(tl.float32)
-        x_norm = x * inv_rms[:, None] * rms_w[None, :]
-
-        k_w_ptrs = k_weight_ptr + offs_k[:, None] * stride_kwk + offs_n[None, :] * stride_kwn
-        v_w_ptrs = v_weight_ptr + offs_k[:, None] * stride_vwk + offs_n[None, :] * stride_vwn
-        k_w = tl.load(k_w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
-        v_w = tl.load(v_w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
-
-        k_acc += tl.dot(x_norm, k_w)
-        v_acc += tl.dot(x_norm, v_w)
-
-    k_out_ptrs = k_out_ptr + offs_m[:, None] * stride_kom + offs_n[None, :] * stride_kon
-    v_out_ptrs = v_out_ptr + offs_m[:, None] * stride_vom + offs_n[None, :] * stride_von
-    tl.store(k_out_ptrs, k_acc, mask=mask_m[:, None] & mask_n[None, :])
-    tl.store(v_out_ptrs, v_acc, mask=mask_m[:, None] & mask_n[None, :])
-
-
 # ============================================================================
 # Layer Classes
 # ============================================================================
@@ -899,98 +772,64 @@ class Linear:
 
 
 class DecoderRMSNormQKV:
-    """Fuse decoder RMSNorm with split Q and KV projections."""
+    """Fused decoder RMSNorm + QKV projection (Plan C: concatenated cuBLAS GEMM).
+
+    Refactored from the original 2-kernel approach (rmsnorm_q_fused + rmsnorm_kv_fused)
+    which had 4x redundant x reads and 40x redundant RMS calculations.
+
+    New approach:
+      1. Single Triton RMSNorm kernel (reads x once)
+      2. Single cuBLAS GEMM on concatenated W_qkv (reads x_norm once)
+      3. Split output into Q, K, V
+    """
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     def __init__(self, rmsnorm: RMSNorm, q_proj: Linear, k_proj: Linear, v_proj: Linear):
         self.rmsnorm = rmsnorm
         self.q_proj = q_proj
         self.k_proj = k_proj
         self.v_proj = v_proj
+        self._qkv_weight_t = None
+        self._n_q = q_proj.out_features
+        self._n_k = k_proj.out_features
+        self._n_v = v_proj.out_features
 
-    def _prepare_weights(self, device: torch.device) -> None:
+    def _prepare_qkv_weight(self, device: torch.device) -> None:
+        """Pre-concatenate Q/K/V transposed weights into a single (K, N_q+N_k+N_v) matrix."""
+        if self._qkv_weight_t is not None and self._qkv_weight_t.device == device:
+            return
         if self.rmsnorm.weight.device != device:
             self.rmsnorm.weight = self.rmsnorm.weight.to(device)
-
         for proj in (self.q_proj, self.k_proj, self.v_proj):
             if proj.weight.device != device:
                 proj.weight = proj.weight.to(device)
-                proj._weight_t_padded = None
-            proj._ensure_weight_prepared()
+        self._qkv_weight_t = torch.cat([
+            self.q_proj.weight.t().contiguous(),
+            self.k_proj.weight.t().contiguous(),
+            self.v_proj.weight.t().contiguous(),
+        ], dim=1).contiguous()
 
     def __call__(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         original_shape = x.shape
         batch_dims = original_shape[:-1]
         M = int(np.prod(batch_dims))
-        K = self.rmsnorm.hidden_size
 
-        x_2d = x.reshape(M, K).to(torch.float32).contiguous()
-        self._prepare_weights(x.device)
+        # Step 1: RMSNorm — single Triton kernel, x read once
+        x_norm = self.rmsnorm(x)
 
-        q = torch.empty((M, self.q_proj.out_features), dtype=torch.float32, device=x.device)
-        k = torch.empty((M, self.k_proj.out_features), dtype=torch.float32, device=x.device)
-        v = torch.empty((M, self.v_proj.out_features), dtype=torch.float32, device=x.device)
+        # Step 2: Single cuBLAS GEMM on concatenated QKV weights
+        self._prepare_qkv_weight(x.device)
+        x_norm_2d = x_norm.reshape(M, -1).to(torch.float32)
+        qkv = x_norm_2d @ self._qkv_weight_t
 
-        q_grid = (
-            triton.cdiv(M, self.TILE_M),
-            triton.cdiv(self.q_proj.out_features, self.TILE_N),
-        )
-        rmsnorm_q_fused[q_grid](
-            x_2d,
-            self.rmsnorm.weight,
-            self.q_proj._weight_t_padded,
-            q,
-            M,
-            self.q_proj.out_features,
-            K,
-            x_2d.stride(0),
-            x_2d.stride(1),
-            self.q_proj._weight_t_padded.stride(0),
-            self.q_proj._weight_t_padded.stride(1),
-            q.stride(0),
-            q.stride(1),
-            self.rmsnorm.eps,
-            BLOCK_M=self.TILE_M,
-            BLOCK_N=self.TILE_N,
-            BLOCK_K=self.TILE_K,
-        )
-
-        kv_grid = (
-            triton.cdiv(M, self.TILE_M),
-            triton.cdiv(self.k_proj.out_features, self.TILE_N),
-        )
-        rmsnorm_kv_fused[kv_grid](
-            x_2d,
-            self.rmsnorm.weight,
-            self.k_proj._weight_t_padded,
-            self.v_proj._weight_t_padded,
-            k,
-            v,
-            M,
-            self.k_proj.out_features,
-            K,
-            x_2d.stride(0),
-            x_2d.stride(1),
-            self.k_proj._weight_t_padded.stride(0),
-            self.k_proj._weight_t_padded.stride(1),
-            self.v_proj._weight_t_padded.stride(0),
-            self.v_proj._weight_t_padded.stride(1),
-            k.stride(0),
-            k.stride(1),
-            v.stride(0),
-            v.stride(1),
-            self.rmsnorm.eps,
-            BLOCK_M=self.TILE_M,
-            BLOCK_N=self.TILE_N,
-            BLOCK_K=self.TILE_K,
-        )
+        # Step 3: Split into Q, K, V
+        q, k, v = qkv.split([self._n_q, self._n_k, self._n_v], dim=-1)
 
         return (
-            q.reshape(*batch_dims, self.q_proj.out_features),
-            k.reshape(*batch_dims, self.k_proj.out_features),
-            v.reshape(*batch_dims, self.v_proj.out_features),
+            q.reshape(*batch_dims, self._n_q),
+            k.reshape(*batch_dims, self._n_k),
+            v.reshape(*batch_dims, self._n_v),
         )
 
 

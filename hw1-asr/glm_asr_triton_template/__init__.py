@@ -20,7 +20,7 @@ from . import layers
 layers.Linear.BACKEND = "cublas"
 layers.MLP.FUSED = False
 layers.EncoderMLP.FUSED = False
-layers.DecoderRMSNormQKV.FUSED = False
+layers.DecoderRMSNormQKV.FUSED = True
 
 from . import attention
 
