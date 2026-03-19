@@ -1,0 +1,127 @@
+{
+  "device": "NVIDIA H200 MIG 1g.18gb",
+  "model_dims": {
+    "hidden_size": 2048,
+    "num_heads": 16,
+    "num_kv_heads": 4,
+    "head_dim": 128
+  },
+  "warmup_iters": 50,
+  "bench_iters": 200,
+  "correctness": [
+    {
+      "seq_len": 1,
+      "err_q": 0.12921142578125,
+      "err_k": 0.1000823974609375,
+      "err_v": 0.13330078125,
+      "pass": false
+    },
+    {
+      "seq_len": 16,
+      "err_q": 0.155364990234375,
+      "err_k": 0.138641357421875,
+      "err_v": 0.1467742919921875,
+      "pass": false
+    },
+    {
+      "seq_len": 59,
+      "err_q": 0.172149658203125,
+      "err_k": 0.1503448486328125,
+      "err_v": 0.1565093994140625,
+      "pass": false
+    },
+    {
+      "seq_len": 128,
+      "err_q": 0.1721954345703125,
+      "err_k": 0.1581573486328125,
+      "err_v": 0.156463623046875,
+      "pass": false
+    },
+    {
+      "seq_len": 256,
+      "err_q": 0.1759796142578125,
+      "err_k": 0.17828369140625,
+      "err_v": 0.156829833984375,
+      "pass": false
+    }
+  ],
+  "performance": [
+    {
+      "label": "Prefill (typical ASR)",
+      "batch": 1,
+      "seq_len": 59,
+      "unfused_mean_ms": 0.2548839996010065,
+      "unfused_std_ms": 0.004932723016264488,
+      "fused_mean_ms": 0.31690832152962684,
+      "fused_std_ms": 0.0020849243354136584,
+      "speedup": 0.8042830758458898,
+      "improvement_pct": -24.33433327541656
+    },
+    {
+      "label": "Decode 1-token",
+      "batch": 1,
+      "seq_len": 1,
+      "unfused_mean_ms": 0.25550511986017227,
+      "unfused_std_ms": 0.0019667742436587955,
+      "fused_mean_ms": 0.3066446396708489,
+      "fused_std_ms": 0.0022424712148460574,
+      "speedup": 0.8332287175618998,
+      "improvement_pct": -20.015066562526503
+    },
+    {
+      "label": "Short prefill",
+      "batch": 1,
+      "seq_len": 16,
+      "unfused_mean_ms": 0.27953824028372765,
+      "unfused_std_ms": 0.0017722807633858333,
+      "fused_mean_ms": 0.311318239569664,
+      "fused_std_ms": 0.0017697655876650104,
+      "speedup": 0.8979179654559722,
+      "improvement_pct": -11.368748423714784
+    },
+    {
+      "label": "Long prefill",
+      "batch": 1,
+      "seq_len": 128,
+      "unfused_mean_ms": 0.43801056042313574,
+      "unfused_std_ms": 0.03717867699775475,
+      "fused_mean_ms": 0.45361727982759475,
+      "fused_std_ms": 0.0034289208552688998,
+      "speedup": 0.9655949627615804,
+      "improvement_pct": -3.5630920380965923
+    },
+    {
+      "label": "Max prefill",
+      "batch": 1,
+      "seq_len": 256,
+      "unfused_mean_ms": 0.7563292789459228,
+      "unfused_std_ms": 0.002467420677698735,
+      "fused_mean_ms": 0.8134038409590721,
+      "fused_std_ms": 0.005439134432507567,
+      "speedup": 0.9298324409854599,
+      "improvement_pct": -7.5462584355709055
+    },
+    {
+      "label": "Batch 4 decode",
+      "batch": 4,
+      "seq_len": 1,
+      "unfused_mean_ms": 0.13067328095436095,
+      "unfused_std_ms": 0.001726141132802831,
+      "fused_mean_ms": 0.305596319437027,
+      "fused_std_ms": 0.002223504600201067,
+      "speedup": 0.42760096455051805,
+      "improvement_pct": -133.86289622877058
+    },
+    {
+      "label": "Batch 8 decode",
+      "batch": 8,
+      "seq_len": 1,
+      "unfused_mean_ms": 0.17451471954584122,
+      "unfused_std_ms": 0.0018491883330232389,
+      "fused_mean_ms": 0.311570400595665,
+      "fused_std_ms": 0.009972792783404365,
+      "speedup": 0.5601132816602648,
+      "improvement_pct": -78.53531289881953
+    }
+  ]
+}
