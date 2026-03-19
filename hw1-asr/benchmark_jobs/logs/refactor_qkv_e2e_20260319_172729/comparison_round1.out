@@ -1,0 +1,19 @@
+==========================================================================================
+Fusion Benchmark Comparison
+==========================================================================================
+Baseline : glm_asr_triton_example
+Candidate: glm_asr_triton_template
+
+Audio encoder                baseline=  628.03ms  candidate=  627.42ms  delta=   -0.62ms  improvement=   0.10%
+Projector                    baseline=    4.55ms  candidate=    4.54ms  delta=   -0.01ms  improvement=   0.31%
+Decoder prefill              baseline=   45.16ms  candidate=   44.12ms  delta=   -1.04ms  improvement=   2.31%
+Decode step                  baseline=   18.36ms  candidate=   15.19ms  delta=   -3.17ms  improvement=  17.28%
+Avg first 5 layers           baseline=    1.80ms  candidate=    1.72ms  delta=   -0.08ms  improvement=   4.56%
+Estimated total              baseline= 1595.76ms  candidate= 1435.49ms  delta= -160.27ms  improvement=  10.04%
+
+Per-layer comparison:
+Layer 0                      baseline=    1.88ms  candidate=    1.74ms  delta=   -0.14ms  improvement=   7.31%
+Layer 1                      baseline=    1.80ms  candidate=    1.71ms  delta=   -0.08ms  improvement=   4.64%
+Layer 2                      baseline=    1.79ms  candidate=    1.71ms  delta=   -0.08ms  improvement=   4.20%
+Layer 3                      baseline=    1.77ms  candidate=    1.72ms  delta=   -0.05ms  improvement=   3.03%
+Layer 4                      baseline=    1.78ms  candidate=    1.72ms  delta=   -0.06ms  improvement=   3.47%

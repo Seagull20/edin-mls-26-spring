@@ -1,0 +1,26 @@
+============================================
+DecoderRMSNormQKV Refactor — Correctness Test
+============================================
+Node: saxa.inf.ed.ac.uk
+Branch: refactor-rmsnorm-qkv
+NVIDIA H200, 143771 MiB
+
+=== Test 1: End-to-end ASR correctness (fused=True, default) ===
+======================================================================
+GLM-ASR Student Version Benchmark
+======================================================================
+
+Loading test audio...
+Loaded audio from /home/s2866920/edin-mls-26-spring/hw1-asr/test_audio.wav
+Audio duration: 3.50s
+Expected: CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS
+
+======================================================================
+Testing: glm_asr_triton_template
+======================================================================
+Loading model from glm_asr_triton_template...
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...

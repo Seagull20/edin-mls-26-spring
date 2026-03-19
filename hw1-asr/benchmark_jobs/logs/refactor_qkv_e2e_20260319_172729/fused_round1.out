@@ -1,0 +1,64 @@
+======================================================================
+GLM-ASR Fusion Benchmark
+======================================================================
+
+Loading test audio...
+Audio: 3.50s @ 16000Hz
+
+Loading model from glm_asr_triton_template...
+Benchmark toggles:
+  Linear.BACKEND = cublas
+  MLP.FUSED = False
+  EncoderMLP.FUSED = False
+  DecoderRMSNormQKV.FUSED = True
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Input features shape: torch.Size([1, 128, 3000])
+Input IDs shape: torch.Size([1, 59])
+
+Warming up model...
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 627.42ms (+/- 0.31ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 4.54ms (+/- 0.04ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 44.12ms (+/- 0.06ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 15.19ms (+/- 0.07ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 1.74ms (+/- 0.06ms)
+  Layer 1: 1.71ms (+/- 0.03ms)
+  Layer 2: 1.71ms (+/- 0.05ms)
+  Layer 3: 1.72ms (+/- 0.04ms)
+  Layer 4: 1.72ms (+/- 0.04ms)
+
+======================================================================
+PERFORMANCE SUMMARY
+======================================================================
+
+Component                              Time (ms)   % of Total
+------------------------------------------------------------
+Audio Encoder                           627.42ms       43.7%
+Multi-modal Projector                     4.54ms        0.3%
+Decoder (Prefill)                        44.12ms        3.1%
+Decoder (50 decode steps)               759.42ms       52.9%
+------------------------------------------------------------
+TOTAL (estimated for 50 tokens)        1435.49ms
+
+BENCHMARK_JSON={"folder": "glm_asr_triton_template", "runs": 5, "audio_path": "/home/s2866920/edin-mls-26-spring/hw1-asr/test_audio.wav", "flags": {"linear_backend": "cublas", "mlp_fused": false, "encoder_mlp_fused": false, "decoder_qkv_fused": true}, "results": {"audio_encoder": {"mean": 627.4162475585938, "std": 0.31496975178279657, "min": 627.0787353515625, "max": 627.995849609375}, "projector": {"mean": 4.538489627838135, "std": 0.043241620029544195, "min": 4.514336109161377, "max": 4.624896049499512}, "decoder_prefill": {"mean": 44.11636505126953, "std": 0.062190444865105915, "min": 44.02918243408203, "max": 44.17718505859375}, "decode_step": {"mean": 15.188313579559326, "std": 0.07408520870372509, "min": 15.081855773925781, "max": 15.31760025024414}, "layers": [{"name": "layer_0", "mean": 1.7432447910308837, "std": 0.06215564955343705}, {"name": "layer_1", "mean": 1.7145471811294555, "std": 0.03241763251198544}, {"name": "layer_2", "mean": 1.7144960165023804, "std": 0.05084619872612879}, {"name": "layer_3", "mean": 1.7186047792434693, "std": 0.04008875090060858}, {"name": "layer_4", "mean": 1.7153856039047242, "std": 0.03859969988172311}]}}

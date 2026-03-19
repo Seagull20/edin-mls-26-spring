@@ -1,0 +1,30 @@
+Node: saxa.inf.ed.ac.uk
+NVIDIA H200, 143771 MiB
+Branch: refactor-rmsnorm-qkv
+
+============================================================
+DecoderRMSNormQKV Refactor (Plan C) — Correctness Test
+============================================================
+Device: NVIDIA H200 MIG 1g.18gb
+Dimensions: K=2048, N_q=2048, N_k=512, N_v=512
+
+  decode b=1 s=1             max|dQ|=0.00e+00  max|dK|=6.48e-05  max|dV|=6.10e-05  [PASS]
+  prefill b=1 s=16           max|dQ|=1.14e-04  max|dK|=1.07e-04  max|dV|=8.87e-05  [PASS]
+  prefill b=1 s=59           max|dQ|=1.60e-04  max|dK|=1.45e-04  max|dV|=1.34e-04  [PASS]
+  prefill b=1 s=128          max|dQ|=4.12e-04  max|dK|=3.51e-04  max|dV|=4.27e-04  [PASS]
+  prefill b=1 s=256          max|dQ|=2.67e-04  max|dK|=2.37e-04  max|dV|=2.52e-04  [PASS]
+  decode b=4 s=1             max|dQ|=7.63e-05  max|dK|=6.68e-05  max|dV|=6.10e-05  [PASS]
+  decode b=8 s=1             max|dQ|=1.01e-04  max|dK|=1.14e-04  max|dV|=9.92e-05  [PASS]
+
+============================================================
+Performance Comparison (200 runs, 50 warmup)
+============================================================
+  decode b=1 s=1             unfused=0.209ms  fused=0.234ms  speedup=0.892x  (-12.1%)
+  prefill b=1 s=16           unfused=0.234ms  fused=0.100ms  speedup=2.341x  (+57.3%)
+  prefill b=1 s=59           unfused=0.198ms  fused=0.168ms  speedup=1.179x  (+15.2%)
+  prefill b=1 s=128          unfused=0.371ms  fused=0.365ms  speedup=1.017x  (+1.6%)
+  prefill b=1 s=256          unfused=0.710ms  fused=0.629ms  speedup=1.129x  (+11.5%)
+  decode b=4 s=1             unfused=0.086ms  fused=0.080ms  speedup=1.077x  (+7.2%)
+  decode b=8 s=1             unfused=0.129ms  fused=0.098ms  speedup=1.323x  (+24.4%)
+
+Overall: ALL PASS
