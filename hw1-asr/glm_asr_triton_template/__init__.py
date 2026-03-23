@@ -17,7 +17,12 @@ if _dir not in sys.path:
 
 from . import layers
 
-layers.Linear.BACKEND = "cublas"
+_linear_backend_env = os.environ.get("LINEAR_BACKEND", "cublas")
+layers.Linear.BACKEND = _linear_backend_env
+
+_linear_autotune_env = os.environ.get("LINEAR_AUTOTUNE", "0")
+layers.Linear.USE_AUTOTUNE = _linear_autotune_env in ("1", "true", "True", "yes")
+
 layers.MLP.FUSED = False
 layers.EncoderMLP.FUSED = False
 layers.DecoderRMSNormQKV.FUSED = True

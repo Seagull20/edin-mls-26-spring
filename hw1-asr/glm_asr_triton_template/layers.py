@@ -141,6 +141,27 @@ def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     tl.store(y_ptr + offs, y, mask=mask)
 
 
+_linear_autotune_configs = [
+    # Baseline
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=2),
+    # Large tiles for big matrices (large N/K in decoder layers)
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8, num_stages=3),
+    # Asymmetric tiles
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64,  "BLOCK_K": 32}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=3),
+    # Small BLOCK_M for decode (M=1)
+    triton.Config({"BLOCK_M": 16,  "BLOCK_N": 64,  "BLOCK_K": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 16,  "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=3),
+    # Higher pipeline depth
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8, num_stages=4),
+]
+
+
 @triton.jit
 def linear_kernel_tf32(
     a_ptr,
@@ -164,6 +185,61 @@ def linear_kernel_tf32(
     A: (M, K), B: (K, N), C: (M, N)
 
     Grid: (M // BLOCK_M, N // BLOCK_N)
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, K, BLOCK_K):
+        mask_k = (k + offs_k) < K
+        a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs,
+        acc,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+@triton.autotune(configs=_linear_autotune_configs, key=["M", "N", "K"])
+@triton.jit
+def linear_kernel_tf32_autotuned(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """
+    Autotuned TF32-style matmul: output = A @ B.
+    A: (M, K), B: (K, N), C: (M, N)
+
+    Grid: (cdiv(M, BLOCK_M), cdiv(N, BLOCK_N))
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -645,6 +721,7 @@ class Linear:
     TILE_K = 32
 
     BACKEND = "torch"
+    USE_AUTOTUNE = False
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.in_features = in_features
@@ -657,6 +734,7 @@ class Linear:
         self._weight_t_padded = None
         self._K_padded = None
         self._N_padded = None
+        self._weight_t_unpadded = None
 
     def _ensure_weight_prepared(self):
         """Cache transposed and padded weight for Triton kernel."""
@@ -678,10 +756,17 @@ class Linear:
             else:
                 self._weight_t_padded = weight_t
 
+    def _ensure_weight_prepared_unpadded(self):
+        """Cache transposed (but unpadded) weight for the autotuned kernel."""
+        if self._weight_t_unpadded is None:
+            self._weight_t_unpadded = self.weight.t().contiguous()
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if Linear.BACKEND in ("torch", "cublas"):
             return self._forward_torch(x)
         if Linear.BACKEND == "triton":
+            if Linear.USE_AUTOTUNE:
+                return self._forward_triton_autotuned(x)
             return self._forward_triton(x)
         M = int(np.prod(x.shape[:-1]))
         if M >= self.TILE_M and x.is_cuda:
@@ -762,6 +847,47 @@ class Linear:
         )
 
         output = output[:M, :N]
+
+        if self.has_bias and self.bias_param is not None:
+            if self.bias_param.device != x.device:
+                self.bias_param = self.bias_param.to(x.device)
+            output = output + self.bias_param
+
+        return output.reshape(*batch_dims, self.out_features)
+
+    def _forward_triton_autotuned(self, x: torch.Tensor) -> torch.Tensor:
+        """Triton matmul backend with autotuned block sizes (no padding needed)."""
+        original_shape = x.shape
+        batch_dims = original_shape[:-1]
+
+        M = int(np.prod(batch_dims))
+        K = self.in_features
+        N = self.out_features
+
+        x_2d = x.reshape(M, K).to(torch.float32).contiguous()
+
+        if self.weight.device != x.device:
+            self.weight = self.weight.to(x.device)
+            self._weight_t_unpadded = None
+        self._ensure_weight_prepared_unpadded()
+
+        output = torch.empty((M, N), dtype=torch.float32, device=x.device)
+
+        grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))
+        linear_kernel_tf32_autotuned[grid](
+            x_2d,
+            self._weight_t_unpadded,
+            output,
+            M,
+            N,
+            K,
+            x_2d.stride(0),
+            x_2d.stride(1),
+            self._weight_t_unpadded.stride(0),
+            self._weight_t_unpadded.stride(1),
+            output.stride(0),
+            output.stride(1),
+        )
 
         if self.has_bias and self.bias_param is not None:
             if self.bias_param.device != x.device:
