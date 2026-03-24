@@ -373,6 +373,67 @@ def next_power_of_two(x: int) -> int:
 MAX_ATTENTION_DIM = 256
 
 
+def _prepare_attention_mask(
+    attention_mask: Optional[torch.Tensor],
+    batch: int,
+    num_heads: int,
+    seq_q: int,
+    seq_k: int,
+    seq_k_padded: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Broadcast and flatten an attention mask for Triton kernels."""
+    if attention_mask is None:
+        return None
+
+    if attention_mask.ndim == 4:
+        if attention_mask.shape[0] != batch or attention_mask.shape[2:] != (seq_q, seq_k):
+            raise ValueError(
+                "4D attention_mask must have shape "
+                f"(batch, heads|1, seq_q, seq_k), got {tuple(attention_mask.shape)}"
+            )
+        if attention_mask.shape[1] == 1 and num_heads != 1:
+            attention_mask = attention_mask.expand(batch, num_heads, seq_q, seq_k)
+        elif attention_mask.shape[1] != num_heads:
+            raise ValueError(
+                "4D attention_mask second dimension must match num_heads or be 1, "
+                f"got {attention_mask.shape[1]} vs {num_heads}"
+            )
+        attention_mask = attention_mask.reshape(batch * num_heads, seq_q, seq_k)
+    elif attention_mask.ndim == 3:
+        if attention_mask.shape[1:] != (seq_q, seq_k):
+            raise ValueError(
+                "3D attention_mask must have shape "
+                f"(batch*num_heads|batch, seq_q, seq_k), got {tuple(attention_mask.shape)}"
+            )
+        if attention_mask.shape[0] == batch and num_heads != 1:
+            attention_mask = attention_mask[:, None, :, :].expand(
+                batch, num_heads, seq_q, seq_k
+            )
+            attention_mask = attention_mask.reshape(batch * num_heads, seq_q, seq_k)
+        elif attention_mask.shape[0] != batch * num_heads:
+            raise ValueError(
+                "3D attention_mask first dimension must match batch or batch*num_heads, "
+                f"got {attention_mask.shape[0]} vs {batch} / {batch * num_heads}"
+            )
+    else:
+        raise ValueError(
+            f"attention_mask must be 3D or 4D for Triton attention, got ndim={attention_mask.ndim}"
+        )
+
+    attention_mask = attention_mask.to(device=device, dtype=torch.float32)
+    if seq_k_padded != seq_k:
+        mask_padded = torch.zeros(
+            (batch * num_heads, seq_q, seq_k_padded),
+            dtype=torch.float32,
+            device=device,
+        )
+        mask_padded[:, :, :seq_k] = attention_mask
+        mask_padded[:, :, seq_k:] = float("-inf")
+        attention_mask = mask_padded
+    return attention_mask.contiguous()
+
+
 def _scaled_dot_product_attention_fused(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -427,23 +488,17 @@ def _scaled_dot_product_attention_fused(
             q_flat = q_padded
 
         # Prepare attention mask for the fused kernel
-        has_mask = attention_mask is not None
-        if has_mask:
-            if attention_mask.ndim == 4:
-                attention_mask = attention_mask.reshape(
-                    batch * num_heads, seq_q, seq_k
-                )
-            if seq_k_padded != seq_k:
-                mask_padded = torch.zeros(
-                    (batch * num_heads, seq_q, seq_k_padded),
-                    dtype=torch.float32,
-                    device=q.device,
-                )
-                mask_padded[:, :, :seq_k] = attention_mask
-                mask_padded[:, :, seq_k:] = float("-inf")
-                attention_mask = mask_padded
-            mask_flat = attention_mask.contiguous()
-        else:
+        mask_flat = _prepare_attention_mask(
+            attention_mask,
+            batch,
+            num_heads,
+            seq_q,
+            seq_k,
+            seq_k_padded,
+            q.device,
+        )
+        has_mask = mask_flat is not None
+        if not has_mask:
             # Dummy pointer — won't be dereferenced when HAS_MASK=False
             mask_flat = q_flat
 
@@ -602,21 +657,17 @@ def _scaled_dot_product_attention_unfused(
             ) * -1e9
             scores = scores + mask[None, :, :]
 
-        if attention_mask is not None:
-            if attention_mask.ndim == 4:
-                attention_mask = attention_mask.reshape(
-                    batch * num_heads, seq_q, seq_k
-                )
-            if seq_k_padded != seq_k:
-                mask_padded = torch.zeros(
-                    (batch * num_heads, seq_q, seq_k_padded),
-                    dtype=torch.float32,
-                    device=q.device,
-                )
-                mask_padded[:, :, :seq_k] = attention_mask
-                mask_padded[:, :, seq_k:] = -1e9
-                attention_mask = mask_padded
-            scores = scores + attention_mask
+        prepared_mask = _prepare_attention_mask(
+            attention_mask,
+            batch,
+            num_heads,
+            seq_q,
+            seq_k,
+            seq_k_padded,
+            q.device,
+        )
+        if prepared_mask is not None:
+            scores = scores + prepared_mask
 
         scores_2d = scores.reshape(batch * num_heads * seq_q, seq_k_padded)
         block = seq_k_padded
