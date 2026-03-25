@@ -25,7 +25,13 @@ layers.Linear.USE_AUTOTUNE = _linear_autotune_env in ("1", "true", "True", "yes"
 
 layers.MLP.FUSED = False
 layers.EncoderMLP.FUSED = False
-layers.DecoderRMSNormQKV.FUSED = True
+_decoder_qkv_fusion_env = os.environ.get("DECODER_QKV_FUSION", "1")
+layers.DecoderRMSNormQKV.FUSED = _decoder_qkv_fusion_env in (
+    "1",
+    "true",
+    "True",
+    "yes",
+)
 
 from . import attention
 
