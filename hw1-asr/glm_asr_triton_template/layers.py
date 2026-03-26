@@ -90,65 +90,59 @@ def rmsnorm_qkv_kernel(
     BLOCK_K: tl.constexpr,
 ):
     """
-    Fused RMSNorm + QKV projection: output = (x / RMS(x) * w_norm) @ W_qkv.
-    Computes inv_rms once per M tile, then reuses it across all N tiles.
+    Fused RMSNorm + QKV projection: output = (x / RMS(x) * w_norm) @ W_qkv
+    Two passes over K: pass 1 computes inv_rms, pass 2 does normalized matmul.
 
     x:          (M, K)
     rmsnorm_w:  (K,)
     qkv_w:      (K, N)   — pre-concatenated [W_q | W_k | W_v]^T
     output:     (M, N)
 
-    Grid: (cdiv(M, BLOCK_M),)
+    Grid: (cdiv(M, BLOCK_M), cdiv(N, BLOCK_N))
     """
     pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
-    mask_m = offs_m < M
 
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
+    # --- Pass 1: compute inv_rms for each row in this BLOCK_M tile ---
     rms_acc = tl.zeros((BLOCK_M,), dtype=tl.float32)
     for k in range(0, K, BLOCK_K):
         k_offs = k + offs_k
         mask_k = k_offs < K
         x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
-        x_tile = tl.load(
-            x_ptrs,
-            mask=mask_m[:, None] & mask_k[None, :],
-            other=0.0,
-        ).to(tl.float32)
+        x_tile = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
         rms_acc += tl.sum(x_tile * x_tile, axis=1)
-    inv_rms = tl.rsqrt(rms_acc / K + eps)
+    inv_rms = tl.rsqrt(rms_acc / K + eps)  # (BLOCK_M,)
 
-    for n in range(0, N, BLOCK_N):
-        offs_n = n + tl.arange(0, BLOCK_N)
-        mask_n = offs_n < N
-        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # --- Pass 2: fused normalize + GEMM ---
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, K, BLOCK_K):
+        k_offs = k + offs_k
+        mask_k = k_offs < K
 
-        for k in range(0, K, BLOCK_K):
-            k_offs = k + offs_k
-            mask_k = k_offs < K
+        # Load x tile (BLOCK_M, BLOCK_K)
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
+        x_tile = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
 
-            x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
-            x_tile = tl.load(
-                x_ptrs,
-                mask=mask_m[:, None] & mask_k[None, :],
-                other=0.0,
-            ).to(tl.float32)
+        # Load RMSNorm weight (BLOCK_K,) and normalize in-register
+        w_norm = tl.load(rmsnorm_w_ptr + k_offs, mask=mask_k, other=0.0).to(tl.float32)
+        x_tile = x_tile * inv_rms[:, None] * w_norm[None, :]
 
-            w_norm = tl.load(rmsnorm_w_ptr + k_offs, mask=mask_k, other=0.0).to(tl.float32)
-            x_tile = x_tile * inv_rms[:, None] * w_norm[None, :]
+        # Load projection weight tile (BLOCK_K, BLOCK_N)
+        w_ptrs = qkv_w_ptr + k_offs[:, None] * stride_wk + offs_n[None, :] * stride_wn
+        w_tile = tl.load(w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
 
-            w_ptrs = qkv_w_ptr + k_offs[:, None] * stride_wk + offs_n[None, :] * stride_wn
-            w_tile = tl.load(
-                w_ptrs,
-                mask=mask_k[:, None] & mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
+        acc += tl.dot(x_tile, w_tile)
 
-            acc += tl.dot(x_tile, w_tile)
-
-        out_ptrs = output_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
-        tl.store(out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
+    # Store output tile (BLOCK_M, BLOCK_N)
+    out_ptrs = output_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
+    tl.store(out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
 
 
 @triton.jit
@@ -978,8 +972,8 @@ class DecoderRMSNormQKV:
     """Fused decoder RMSNorm + QKV projection using a single Triton kernel.
 
     Fuses RMSNorm normalization and concatenated Q/K/V linear projection into
-    one kernel launch. The kernel computes inv_rms once per M tile, then reuses
-    it while iterating over output N tiles. The intermediate x_norm tensor is
+    one kernel launch. Two passes over K: pass 1 computes inv_rms per row,
+    pass 2 performs the normalized matmul. The intermediate x_norm tensor is
     never materialized in global memory.
     """
 
@@ -994,26 +988,41 @@ class DecoderRMSNormQKV:
         self.k_proj = k_proj
         self.v_proj = v_proj
         self._qkv_weight_t = None
+        self._qkv_weight_t_padded = None
         self._n_q = q_proj.out_features
         self._n_k = k_proj.out_features
         self._n_v = v_proj.out_features
         self._K = q_proj.in_features
         self._N = self._n_q + self._n_k + self._n_v
+        self._K_padded = pad_to_multiple(self._K, self.TILE_K)
+        self._N_padded = pad_to_multiple(self._N, self.TILE_N)
 
     def _prepare_qkv_weight(self, device: torch.device) -> None:
-        """Pre-concatenate Q/K/V transposed weights into a single (K, N_q+N_k+N_v) matrix."""
-        if self._qkv_weight_t is not None and self._qkv_weight_t.device == device:
+        """Pre-concatenate and pad Q/K/V weights into a single (K_pad, N_pad) matrix."""
+        if self._qkv_weight_t_padded is not None and self._qkv_weight_t_padded.device == device:
             return
         if self.rmsnorm.weight.device != device:
             self.rmsnorm.weight = self.rmsnorm.weight.to(device)
         for proj in (self.q_proj, self.k_proj, self.v_proj):
             if proj.weight.device != device:
                 proj.weight = proj.weight.to(device)
+        # Concatenate: (K, N_q+N_k+N_v)
         self._qkv_weight_t = torch.cat([
             self.q_proj.weight.t().contiguous(),
             self.k_proj.weight.t().contiguous(),
             self.v_proj.weight.t().contiguous(),
         ], dim=1).contiguous().to(torch.float32)
+        # Pad to tile multiples
+        K, N = self._K, self._N
+        if self._K_padded > K or self._N_padded > N:
+            padded = torch.zeros(
+                (self._K_padded, self._N_padded),
+                dtype=torch.float32, device=device,
+            )
+            padded[:K, :N] = self._qkv_weight_t
+            self._qkv_weight_t_padded = padded
+        else:
+            self._qkv_weight_t_padded = self._qkv_weight_t
 
     def __call__(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         original_shape = x.shape
@@ -1023,31 +1032,48 @@ class DecoderRMSNormQKV:
         M = int(np.prod(batch_dims))
 
         self._prepare_qkv_weight(x.device)
-        x_2d = x.reshape(M, K).to(torch.float32).contiguous()
-        output = torch.empty((M, N), dtype=torch.float32, device=x.device)
 
-        grid = (triton.cdiv(M, self.TILE_M),)
+        x_2d = x.reshape(M, K).to(torch.float32).contiguous()
+
+        M_padded = pad_to_multiple(M, self.TILE_M)
+
+        # Pad input if needed
+        if M_padded > M or self._K_padded > K:
+            x_padded = torch.zeros(
+                (M_padded, self._K_padded),
+                dtype=torch.float32, device=x.device,
+            )
+            x_padded[:M, :K] = x_2d
+        else:
+            x_padded = x_2d
+
+        output = torch.zeros(
+            (M_padded, self._N_padded),
+            dtype=torch.float32, device=x.device,
+        )
+
+        grid = (
+            triton.cdiv(M_padded, self.TILE_M),
+            triton.cdiv(self._N_padded, self.TILE_N),
+        )
         rmsnorm_qkv_kernel[grid](
-            x_2d,
+            x_padded,
             self.rmsnorm.weight,
-            self._qkv_weight_t,
+            self._qkv_weight_t_padded,
             output,
-            M,
-            N,
-            K,
+            M_padded, self._N_padded, self._K_padded,
             self.rmsnorm.eps,
-            x_2d.stride(0),
-            x_2d.stride(1),
-            self._qkv_weight_t.stride(0),
-            self._qkv_weight_t.stride(1),
-            output.stride(0),
-            output.stride(1),
+            x_padded.stride(0), x_padded.stride(1),
+            self._qkv_weight_t_padded.stride(0), self._qkv_weight_t_padded.stride(1),
+            output.stride(0), output.stride(1),
             BLOCK_M=self.TILE_M,
             BLOCK_N=self.TILE_N,
             BLOCK_K=self.TILE_K,
         )
 
-        q, k, v = output.split([self._n_q, self._n_k, self._n_v], dim=-1)
+        # Unpad and split into Q, K, V
+        qkv = output[:M, :N]
+        q, k, v = qkv.split([self._n_q, self._n_k, self._n_v], dim=-1)
 
         return (
             q.reshape(*batch_dims, self._n_q),
