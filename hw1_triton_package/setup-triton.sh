@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Bundled copy of the Triton environment setup script for the standalone
+# hw1_triton_package reproducibility archive.
+
 # =========================
 # Config
 # =========================
@@ -115,9 +118,7 @@ else
 fi
 
 # Activate the environment
-# Note: In non-interactive shells, we need to use conda run or source activate
 if [ "${AUTO_YES}" = true ]; then
-	# For non-interactive mode, set up the environment path directly
 	CONDA_ENV_PATH=$(conda info --envs | grep "^${ENV_NAME} " | awk '{print $NF}')
 	export PATH="${CONDA_ENV_PATH}/bin:${PATH}"
 	export CONDA_PREFIX="${CONDA_ENV_PATH}"

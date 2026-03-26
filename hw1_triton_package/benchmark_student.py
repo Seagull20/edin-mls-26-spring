@@ -20,6 +20,76 @@ import importlib
 # Expected transcription for the test audio
 EXPECTED_TEXT = "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
 
+
+def _env_enabled(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value in ("1", "true", "True", "yes")
+
+
+def apply_runtime_config(folder_name, decoder_qkv_default, flash_attn_default):
+    """Apply env-driven runtime toggles to top-level modules loaded from folder_path."""
+    layers = importlib.import_module("layers")
+
+    backend = os.environ.get("LINEAR_BACKEND", "cublas")
+    if hasattr(layers, "Linear"):
+        layers.Linear.BACKEND = backend
+        if hasattr(layers.Linear, "USE_AUTOTUNE"):
+            layers.Linear.USE_AUTOTUNE = _env_enabled("LINEAR_AUTOTUNE", False)
+
+    if hasattr(layers, "MLP"):
+        layers.MLP.FUSED = False
+    if hasattr(layers, "AudioMLP"):
+        layers.AudioMLP.FUSED = False
+    if hasattr(layers, "EncoderMLP"):
+        layers.EncoderMLP.FUSED = False
+    if hasattr(layers, "DecoderRMSNormQKV"):
+        layers.DecoderRMSNormQKV.FUSED = _env_enabled(
+            "DECODER_QKV_FUSION", decoder_qkv_default
+        )
+
+    attention = None
+    try:
+        attention = importlib.import_module("attention")
+    except ImportError:
+        pass
+
+    if attention is not None and hasattr(attention, "USE_FLASH_ATTENTION_FUSION"):
+        attention.USE_FLASH_ATTENTION_FUSION = _env_enabled(
+            "FLASH_ATTN_FUSION", flash_attn_default
+        )
+
+    if "example" in folder_name.lower():
+        print("Applying baseline configuration (example)...")
+        if hasattr(layers, "Linear"):
+            layers.Linear.BACKEND = "cublas"
+            if hasattr(layers.Linear, "USE_AUTOTUNE"):
+                layers.Linear.USE_AUTOTUNE = False
+        if hasattr(layers, "DecoderRMSNormQKV"):
+            layers.DecoderRMSNormQKV.FUSED = False
+        if attention is not None and hasattr(attention, "USE_FLASH_ATTENTION_FUSION"):
+            attention.USE_FLASH_ATTENTION_FUSION = False
+
+    runtime_bits = []
+    if hasattr(layers, "Linear"):
+        runtime_bits.append(f"LINEAR_BACKEND={layers.Linear.BACKEND}")
+        if hasattr(layers.Linear, "USE_AUTOTUNE"):
+            runtime_bits.append(
+                f"LINEAR_AUTOTUNE={int(bool(layers.Linear.USE_AUTOTUNE))}"
+            )
+    if hasattr(layers, "DecoderRMSNormQKV"):
+        runtime_bits.append(
+            f"DECODER_QKV_FUSION={int(bool(layers.DecoderRMSNormQKV.FUSED))}"
+        )
+    if attention is not None and hasattr(attention, "USE_FLASH_ATTENTION_FUSION"):
+        runtime_bits.append(
+            "FLASH_ATTN_FUSION="
+            f"{int(bool(attention.USE_FLASH_ATTENTION_FUSION))}"
+        )
+    if runtime_bits:
+        print("Runtime config: " + ", ".join(runtime_bits))
+
 def download_librispeech_sample():
     """Download a LibriSpeech sample audio file."""
     import urllib.request
@@ -152,14 +222,7 @@ def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
         if mod_name in ['weight_loader', 'model', 'layers', 'attention', 'rope', 'conv', 'decode_attention']:
             del sys.modules[mod_name]
 
-    # Apply version-specific configurations
-    if 'example' in folder_name.lower():
-        print("Applying baseline configuration (example)...")
-        layers = importlib.import_module("layers")
-        layers.Linear.BACKEND = 'cublas'
-        layers.MLP.FUSED = False
-        if hasattr(layers, 'AudioMLP'):
-            layers.AudioMLP.FUSED = False
+    apply_runtime_config(folder_name, decoder_qkv_default=False, flash_attn_default=False)
     print(f"Loading model from {folder_name}...")
     from weight_loader import load_model_from_hf
 
@@ -253,13 +316,7 @@ def benchmark_triton_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
         if mod_name in ['weight_loader', 'model', 'layers', 'attention', 'rope', 'conv', 'decode_attention']:
             del sys.modules[mod_name]
 
-    if 'example' in folder_name.lower():
-        print("Applying baseline configuration (example)...")
-        layers = importlib.import_module("layers")
-        layers.Linear.BACKEND = 'cublas'
-        layers.MLP.FUSED = False
-        if hasattr(layers, 'EncoderMLP'):
-            layers.EncoderMLP.FUSED = False
+    apply_runtime_config(folder_name, decoder_qkv_default=False, flash_attn_default=False)
 
     print(f"Loading model from {folder_name}...")
     from weight_loader import load_model_from_hf
