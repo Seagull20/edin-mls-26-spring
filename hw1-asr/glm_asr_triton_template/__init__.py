@@ -17,7 +17,7 @@ if _dir not in sys.path:
 
 from . import layers
 
-_linear_backend_env = os.environ.get("LINEAR_BACKEND", "cublas")
+_linear_backend_env = os.environ.get("LINEAR_BACKEND", "triton")
 layers.Linear.BACKEND = _linear_backend_env
 
 _linear_autotune_env = os.environ.get("LINEAR_AUTOTUNE", "0")
@@ -25,7 +25,7 @@ layers.Linear.USE_AUTOTUNE = _linear_autotune_env in ("1", "true", "True", "yes"
 
 layers.MLP.FUSED = False
 layers.EncoderMLP.FUSED = False
-_decoder_qkv_fusion_env = os.environ.get("DECODER_QKV_FUSION", "1")
+_decoder_qkv_fusion_env = os.environ.get("DECODER_QKV_FUSION", "0")
 layers.DecoderRMSNormQKV.FUSED = _decoder_qkv_fusion_env in (
     "1",
     "true",
@@ -40,7 +40,7 @@ from . import attention
 # Triton kernel (FlashAttention-style). Set to False for the baseline 3-kernel
 # approach. Can be overridden at runtime or by benchmark scripts via:
 #   import glm_asr_triton_template as m; m.attention.USE_FLASH_ATTENTION_FUSION = True/False
-_flash_attn_env = os.environ.get("FLASH_ATTN_FUSION", "1")
+_flash_attn_env = os.environ.get("FLASH_ATTN_FUSION", "0")
 attention.USE_FLASH_ATTENTION_FUSION = _flash_attn_env in ("1", "true", "True", "yes")
 
 from . import model

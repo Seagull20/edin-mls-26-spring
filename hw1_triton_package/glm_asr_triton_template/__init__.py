@@ -17,7 +17,7 @@ if _dir not in sys.path:
 
 from . import layers
 
-_linear_backend_env = os.environ.get("LINEAR_BACKEND", "cublas")
+_linear_backend_env = os.environ.get("LINEAR_BACKEND", "triton")
 layers.Linear.BACKEND = _linear_backend_env
 
 _linear_autotune_env = os.environ.get("LINEAR_AUTOTUNE", "0")

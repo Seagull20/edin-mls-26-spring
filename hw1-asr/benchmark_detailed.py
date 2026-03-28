@@ -28,7 +28,7 @@ def apply_runtime_config(folder_name, decoder_qkv_default, flash_attn_default):
     """Apply env-driven runtime toggles to top-level modules loaded from folder_path."""
     layers = importlib.import_module("layers")
 
-    backend = os.environ.get("LINEAR_BACKEND", "cublas")
+    backend = os.environ.get("LINEAR_BACKEND", "triton")
     if hasattr(layers, "Linear"):
         layers.Linear.BACKEND = backend
         if hasattr(layers.Linear, "USE_AUTOTUNE"):
@@ -135,6 +135,14 @@ class TorchTimer:
         return elapsed
 
 
+def _untimed_warmup(sync_fn, fn):
+    """Run one synchronized warmup call so first-use compilation is excluded."""
+    sync_fn()
+    result = fn()
+    sync_fn()
+    return result
+
+
 
 def detailed_profile(model, input_features, input_ids, input_features_mask, num_runs=3):
     """Detailed profiling of model components."""
@@ -142,16 +150,34 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
 
     results = {}
     timer = CUDATimer()
+    synchronize = lambda: cp.cuda.Device().synchronize()
+
+    def run_decode_step(token):
+        next_embed = embed_tokens(token)
+        step_hidden = model.text_decoder(inputs_embeds=next_embed)
+        step_logits = model.lm_head(step_hidden)
+        return cp.argmax(step_logits[:, -1, :], axis=-1, keepdims=True)
+
+    def run_layer(layer, layer_input, seq_len):
+        try:
+            return layer(layer_input)
+        except TypeError:
+            position_ids = cp.arange(seq_len, dtype=cp.int64).reshape(1, -1)
+            return layer(layer_input, position_ids=position_ids)
 
     print("\n" + "="*70)
     print("DETAILED OPERATOR PROFILING")
     print("="*70)
+    print("Warmup: 1 untimed run per section")
 
     # 1. Profile Audio Encoder
     print("\n[1/4] Profiling Audio Encoder...")
+    audio_features = _untimed_warmup(
+        synchronize, lambda: model.audio_encoder(input_features)
+    )
     encoder_times = []
     for _ in range(num_runs):
-        cp.cuda.Device().synchronize()
+        synchronize()
         timer.start()
         audio_features = model.audio_encoder(input_features)
         elapsed = timer.stop()
@@ -166,9 +192,12 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
 
     # 2. Profile Multi-modal Projector
     print("\n[2/4] Profiling Multi-modal Projector...")
+    projected = _untimed_warmup(
+        synchronize, lambda: model.multi_modal_projector(audio_features)
+    )
     projector_times = []
     for _ in range(num_runs):
-        cp.cuda.Device().synchronize()
+        synchronize()
         timer.start()
         projected = model.multi_modal_projector(audio_features)
         elapsed = timer.stop()
@@ -200,9 +229,12 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
         if num_audio_tokens <= projected.shape[1]:
             combined_embeds[0, audio_positions[:projected.shape[1]]] = projected[0, :num_audio_tokens]
 
+    hidden_states = _untimed_warmup(
+        synchronize, lambda: model.text_decoder(inputs_embeds=combined_embeds)
+    )
     prefill_times = []
     for _ in range(num_runs):
-        cp.cuda.Device().synchronize()
+        synchronize()
         timer.start()
         # Call with inputs_embeds argument
         hidden_states = model.text_decoder(inputs_embeds=combined_embeds)
@@ -224,17 +256,12 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
     # Get logits and sample first token
     logits = model.lm_head(hidden_states[:, -1:, :])
     next_token = cp.argmax(logits[:, -1, :], axis=-1, keepdims=True)
+    _untimed_warmup(synchronize, lambda: run_decode_step(next_token.copy()))
 
-    for step in range(num_decode_steps):
-        cp.cuda.Device().synchronize()
+    for _ in range(num_decode_steps):
+        synchronize()
         timer.start()
-
-        # Single decode step
-        next_embed = embed_tokens(next_token)
-        step_hidden = model.text_decoder(inputs_embeds=next_embed)
-        step_logits = model.lm_head(step_hidden)
-        next_token = cp.argmax(step_logits[:, -1, :], axis=-1, keepdims=True)
-
+        next_token = run_decode_step(next_token)
         elapsed = timer.stop()
         decode_times.append(elapsed)
 
@@ -261,16 +288,14 @@ def detailed_profile(model, input_features, input_ids, input_features_mask, num_
             layers = []
 
         for i, layer in enumerate(layers):
+            _untimed_warmup(
+                synchronize, lambda layer=layer, layer_input=test_input: run_layer(layer, layer_input, seq_len)
+            )
             times = []
             for _ in range(num_runs):
-                cp.cuda.Device().synchronize()
+                synchronize()
                 timer.start()
-                # Try calling with position_ids if needed
-                try:
-                    test_output = layer(test_input)
-                except TypeError:
-                    position_ids = cp.arange(seq_len, dtype=cp.int64).reshape(1, -1)
-                    test_output = layer(test_input, position_ids=position_ids)
+                test_output = run_layer(layer, test_input, seq_len)
                 elapsed = timer.stop()
                 times.append(elapsed)
 
@@ -295,16 +320,35 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
 
     results = {}
     timer = TorchTimer()
+    synchronize = lambda: torch.cuda.is_available() and torch.cuda.synchronize()
+
+    def run_decode_step(token):
+        next_embed = embed_tokens(token)
+        step_hidden = model.text_decoder(inputs_embeds=next_embed)
+        step_logits = model.lm_head(step_hidden)
+        return torch.argmax(step_logits[:, -1, :], dim=-1, keepdim=True)
+
+    def run_layer(layer, layer_input, seq_len):
+        try:
+            return layer(layer_input)
+        except TypeError:
+            position_ids = torch.arange(
+                seq_len, dtype=torch.int64, device=layer_input.device
+            ).reshape(1, -1)
+            return layer(layer_input, position_ids=position_ids)
 
     print("\n" + "="*70)
     print("DETAILED OPERATOR PROFILING (TORCH)")
     print("="*70)
+    print("Warmup: 1 untimed run per section")
 
     print("\n[1/4] Profiling Audio Encoder...")
+    audio_features = _untimed_warmup(
+        synchronize, lambda: model.audio_encoder(input_features)
+    )
     encoder_times = []
     for _ in range(num_runs):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        synchronize()
         timer.start()
         audio_features = model.audio_encoder(input_features)
         elapsed = timer.stop()
@@ -318,10 +362,12 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
     print(f"  Audio Encoder: {results['audio_encoder']['mean']:.2f}ms (+/- {results['audio_encoder']['std']:.2f}ms)")
 
     print("\n[2/4] Profiling Multi-modal Projector...")
+    projected = _untimed_warmup(
+        synchronize, lambda: model.multi_modal_projector(audio_features)
+    )
     projector_times = []
     for _ in range(num_runs):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        synchronize()
         timer.start()
         projected = model.multi_modal_projector(audio_features)
         elapsed = timer.stop()
@@ -348,10 +394,12 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
         if num_audio_tokens <= projected.shape[1]:
             combined_embeds[0, audio_positions[:projected.shape[1]]] = projected[0, :num_audio_tokens]
 
+    hidden_states = _untimed_warmup(
+        synchronize, lambda: model.text_decoder(inputs_embeds=combined_embeds)
+    )
     prefill_times = []
     for _ in range(num_runs):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        synchronize()
         timer.start()
         hidden_states = model.text_decoder(inputs_embeds=combined_embeds)
         elapsed = timer.stop()
@@ -370,15 +418,12 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
 
     logits = model.lm_head(hidden_states[:, -1:, :])
     next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+    _untimed_warmup(synchronize, lambda: run_decode_step(next_token.clone()))
 
     for _ in range(num_decode_steps):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        synchronize()
         timer.start()
-        next_embed = embed_tokens(next_token)
-        step_hidden = model.text_decoder(inputs_embeds=next_embed)
-        step_logits = model.lm_head(step_hidden)
-        next_token = torch.argmax(step_logits[:, -1, :], dim=-1, keepdim=True)
+        next_token = run_decode_step(next_token)
         elapsed = timer.stop()
         decode_times.append(elapsed)
 
@@ -403,16 +448,14 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
             layers = []
 
         for i, layer in enumerate(layers):
+            _untimed_warmup(
+                synchronize, lambda layer=layer, layer_input=test_input: run_layer(layer, layer_input, seq_len)
+            )
             times = []
             for _ in range(num_runs):
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
+                synchronize()
                 timer.start()
-                try:
-                    test_output = layer(test_input)
-                except TypeError:
-                    position_ids = torch.arange(seq_len, dtype=torch.int64, device=test_input.device).reshape(1, -1)
-                    test_output = layer(test_input, position_ids=position_ids)
+                test_output = run_layer(layer, test_input, seq_len)
                 elapsed = timer.stop()
                 times.append(elapsed)
 
@@ -554,7 +597,7 @@ def main():
         if mod_name in ['weight_loader', 'model', 'layers', 'attention', 'rope', 'conv']:
             del sys.modules[mod_name]
 
-    apply_runtime_config(args.folder, decoder_qkv_default=True, flash_attn_default=True)
+    apply_runtime_config(args.folder, decoder_qkv_default=False, flash_attn_default=False)
 
     print(f"\nLoading model from {args.folder}...")
     from weight_loader import load_model_from_hf
