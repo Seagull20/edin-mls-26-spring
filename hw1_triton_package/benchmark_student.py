@@ -32,7 +32,7 @@ def apply_runtime_config(folder_name, decoder_qkv_default, flash_attn_default):
     """Apply env-driven runtime toggles to top-level modules loaded from folder_path."""
     layers = importlib.import_module("layers")
 
-    backend = os.environ.get("LINEAR_BACKEND", "cublas")
+    backend = os.environ.get("LINEAR_BACKEND", "triton")
     if hasattr(layers, "Linear"):
         layers.Linear.BACKEND = backend
         if hasattr(layers.Linear, "USE_AUTOTUNE"):

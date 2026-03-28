@@ -64,7 +64,7 @@ FLASH_ATTN_FUSION=1 DECODER_QKV_FUSION=1 LINEAR_AUTOTUNE=1 LINEAR_BACKEND=triton
   ./benchmark.sh glm_asr_triton_template
 ```
 
-**What to look for:** Wall-clock time (ms), standard deviation, and PASS/FAIL correctness status. The report claims 4.7% combined speedup with 100% transcription accuracy.
+**What to look for:** Wall-clock time (ms), standard deviation, and PASS/FAIL correctness status. The report claims 22.3% combined speedup over the Triton baseline with 100% transcription accuracy.
 
 ### 2. Component-Level Profiling (Report Sections 3 and 4)
 
@@ -92,9 +92,10 @@ Optional flags:
 
 | Report Claim | How to Verify |
 |---|---|
-| Baseline latency ~419 ms (Table 4) | `./benchmark.sh glm_asr_triton_example` |
-| Combined optimized latency ~399 ms, +4.7% speedup (Table 4) | `FLASH_ATTN_FUSION=1 DECODER_QKV_FUSION=1 LINEAR_AUTOTUNE=1 LINEAR_BACKEND=triton ./benchmark.sh glm_asr_triton_template` |
-| All configurations pass correctness (Table 4) | Check PASS/FAIL output from both commands above |
+| Reference (cuBLAS) latency ~424 ms (Table 4) | `./benchmark.sh glm_asr_triton_example` |
+| Triton baseline latency ~485 ms (Table 4) | `./benchmark.sh glm_asr_triton_template` |
+| Fully optimized latency ~377 ms, +22.3% speedup (Table 4) | `FLASH_ATTN_FUSION=1 DECODER_QKV_FUSION=1 LINEAR_AUTOTUNE=1 ./benchmark.sh glm_asr_triton_template` |
+| All configurations pass correctness (Table 4) | Check PASS/FAIL output from all commands above |
 | Decoder decode dominates wall-clock time (Section 3) | Compare component times from `./benchmark_detailed.sh` on either variant |
 | Decode-phase kernels are strongly memory-bound, AI ~0.5 (Section 4) | Component profiling shows decode-step times; the low FLOPs/byte ratio follows from the M=1 working set detailed in the report |
 
@@ -107,9 +108,9 @@ The three optimizations in `glm_asr_triton_template` are controlled via environm
 | `FLASH_ATTN_FUSION` | `0` (off) | Enables FlashAttention fused kernel, replacing the 3-kernel attention path |
 | `DECODER_QKV_FUSION` | `0` (off) | Enables fused Triton RMSNorm+QKV kernel, replacing separate RMSNorm + 3 Q/K/V projections (4 kernels → 1) |
 | `LINEAR_AUTOTUNE` | `0` (off) | Enables `@triton.autotune` tile-size selection for linear kernels |
-| `LINEAR_BACKEND` | `cublas` | Linear layer backend: `cublas` (PyTorch/cuBLAS matmul) or `triton` (custom Triton kernel) |
+| `LINEAR_BACKEND` | `triton` | Linear layer backend: `cublas` (PyTorch/cuBLAS matmul) or `triton` (custom Triton kernel) |
 
-The template does not enable the optimized configuration by default. Reproducing the optimized numbers in the report requires setting the corresponding environment variables explicitly.
+The template defaults to the Triton linear backend, but all optional optimizations remain off until they are explicitly enabled via environment variables.
 
 ### Ablation Examples (Report Table 4)
 
